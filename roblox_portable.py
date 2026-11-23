@@ -171,8 +171,21 @@ def explain(e):
             return "Die Datei wurde auf dem Roblox-Server nicht gefunden (HTTP 404). Bitte später erneut versuchen."
         return "Serverfehler von Roblox (HTTP %d). Bitte später erneut versuchen." % e.code
     if isinstance(e, NET_ERRORS):
-        return ("Keine Verbindung zu den Roblox-Servern. Bitte Internetverbindung, Proxy oder "
-                "Firewall prüfen und erneut versuchen.")
+        import ssl
+        r = getattr(e, "reason", e)
+        if isinstance(r, ssl.SSLError):
+            why = ("Zertifikatsfehler: Ein Proxy/Virenscanner im Netzwerk prüft vermutlich den HTTPS-Verkehr "
+                   "und Roblox wird dadurch abgelehnt.")
+        elif isinstance(r, socket.gaierror):
+            why = "Der Servername ließ sich nicht auflösen (DNS). Roblox-Domains sind vermutlich im Netzwerk gesperrt."
+        elif isinstance(r, (socket.timeout, TimeoutError)):
+            why = "Zeitüberschreitung: Der Server antwortet nicht (Firewall/Netzwerkfilter?)."
+        elif isinstance(r, ConnectionRefusedError):
+            why = "Die Verbindung wurde aktiv abgelehnt (Firewall/Proxy)."
+        else:
+            why = "Verbindung fehlgeschlagen."
+        return ("Keine Verbindung zu den Roblox-Servern. %s Bitte Internetverbindung, Proxy oder Firewall prüfen. "
+                "Technische Details: %s: %s" % (why, type(r).__name__, r))
     if isinstance(e, PermissionError):
         return ("Zugriff auf eine Datei verweigert/blockiert. Möglicherweise sperrt ein Virenscanner, eine "
                 "Sicherheitsrichtlinie oder ein laufender Roblox-Prozess die Datei: %s" % e)
