@@ -156,5 +156,50 @@ class T(unittest.TestCase):
         self.assertIn("Keine neuen", rp.diff_report(s, s, "t"))
 
 
+    def _publish_launcher(self, n, sha_ok=True):
+        z = mkzip({"RobloxPortable/RobloxPortable.exe": b"MZnew%d" % n, "RobloxPortable\\_internal\\x.dll": b"d"})
+        sha = hashlib.sha256(z).hexdigest() if sha_ok else "0" * 64
+        STATE["files"]["/RobloxPortable.zip"] = z
+        STATE["files"]["/version.json"] = json.dumps({"version": n, "sha256": sha}).encode()
+
+    def test_launcher_update(self):
+        port = self.srv.server_address[1]
+        old = (rp.APP_VERSION, rp.UPDATE_BASE, rp.UPDATE_HOSTS)
+        rp.UPDATE_BASE, rp.UPDATE_HOSTS = "http://127.0.0.1:%d" % port, ("127.0.0.1",)
+        try:
+            rp.APP_VERSION = 0                                   # Entwicklung: nie updaten
+            self._publish_launcher(5)
+            self.assertIsNone(rp.check_launcher_update(self.ctx))
+            rp.APP_VERSION = 5                                   # gleiche Version: nichts tun
+            self.assertIsNone(rp.check_launcher_update(self.ctx))
+            rp.APP_VERSION = 3
+            self._publish_launcher(5, sha_ok=False)              # falsche Prüfsumme -> verworfen
+            with self.assertRaises(rp.UserError):
+                rp.check_launcher_update(self.ctx)
+            self.assertIsNone(rp.newest_local_launcher(self.paths)[1])
+            self._publish_launcher(5)
+            exe = rp.check_launcher_update(self.ctx)
+            self.assertTrue(os.path.isfile(exe))
+            self.assertTrue(rp._inside(exe, self.paths.base))
+            self.assertEqual(rp.newest_local_launcher(self.paths)[0], 5)
+            self.assertIsNone(rp.check_launcher_update(self.ctx)) # bereits geladen
+            launched = []
+            orig = rp.launch_launcher
+            rp.launch_launcher = lambda p, e: launched.append(e)
+            try:
+                self.assertTrue(rp.redirect_to_newer(self.paths))   # v3 -> v5
+                rp.APP_VERSION = 5
+                self.assertFalse(rp.redirect_to_newer(self.paths))  # v5 bleibt
+            finally:
+                rp.launch_launcher = orig
+            self.assertEqual(launched, [exe])
+            # Host-Allowlist des Updaters
+            rp.UPDATE_BASE, rp.UPDATE_HOSTS = "http://127.0.0.1:%d" % port, ("github.com",)
+            with self.assertRaises(rp.UserError):
+                rp.check_launcher_update(self.ctx)
+        finally:
+            rp.APP_VERSION, rp.UPDATE_BASE, rp.UPDATE_HOSTS = old
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

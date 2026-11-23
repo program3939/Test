@@ -17,6 +17,11 @@ jobs:
           python-version: "3.12"
       - name: Tests
         run: python test_roblox_portable.py
+      - name: Versionsnummer einstempeln
+        shell: bash
+        run: |
+          sed -i 's/^APP_VERSION = 0 /APP_VERSION = ${{ github.run_number }} /' roblox_portable.py
+          grep -n '^APP_VERSION' roblox_portable.py
       - name: PyInstaller (onedir, ohne Admin-Manifest)
         run: |
           python -m pip install pyinstaller
@@ -24,6 +29,12 @@ jobs:
       - name: ZIP erstellen
         shell: pwsh
         run: Compress-Archive -Path dist/RobloxPortable -DestinationPath RobloxPortable.zip
+      - name: version.json (Nummer + SHA-256) erzeugen
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash RobloxPortable.zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path version.json -Encoding ascii -Value ('{"version": ${{ github.run_number }}, "sha256": "' + $h + '"}')
+          Get-Content version.json
       - uses: actions/upload-artifact@v4
         with:
           name: RobloxPortable
@@ -34,4 +45,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest RobloxPortable.zip --title "RobloxPortable (Windows)" --notes "Entpacken und RobloxPortable.exe starten. Kein Admin nötig." --latest
+          gh release create latest RobloxPortable.zip version.json --title "RobloxPortable (Windows)" --notes "Entpacken und RobloxPortable.exe starten. Kein Admin nötig." --latest

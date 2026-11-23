@@ -41,6 +41,9 @@ VERSION_APIS = [
 CDN = "https://setup.rbxcdn.com"
 ALLOWED_SUFFIXES = ("roblox.com", "rbxcdn.com")   # nur offizielle Hosts
 ALLOW_HTTP = False                                  # nur für Tests änderbar
+APP_VERSION = 0                                     # wird beim Build (GitHub Actions) auf die Build-Nummer gesetzt; 0 = Entwicklung, kein Selbst-Update
+UPDATE_BASE = "https://github.com/program3939/Test/releases/download/latest"
+UPDATE_HOSTS = ("github.com", "githubusercontent.com")   # nur für das Launcher-Update
 PLAYER_EXE = "RobloxPlayerBeta.exe"
 
 # Paketname -> Zielunterordner im Versionsordner (wie beim offiziellen Bootstrapper)
@@ -138,20 +141,21 @@ class Ctx:
 
 
 # --------------------------------------------------------------------------- Netzwerk
-def check_host(url):
+def check_host(url, allowed=None):
+    allowed = allowed or ALLOWED_SUFFIXES
     p = urllib.parse.urlparse(url)
     host = (p.hostname or "").lower()
     if p.scheme != "https" and not (ALLOW_HTTP and p.scheme == "http"):
         raise UserError("Unsichere Verbindung abgelehnt (nur HTTPS erlaubt).")
-    if not any(host == s or host.endswith("." + s) for s in ALLOWED_SUFFIXES):
+    if not any(host == s or host.endswith("." + s) for s in allowed):
         raise UserError("Download von nicht-offiziellem Server abgelehnt: %s" % host)
 
 
-def _open(url, headers=None, timeout=30):
-    check_host(url)
+def _open(url, headers=None, timeout=30, allowed=None):
+    check_host(url, allowed)
     req = urllib.request.Request(url, headers=dict({"User-Agent": UA}, **(headers or {})))
     resp = urllib.request.urlopen(req, timeout=timeout)
-    check_host(resp.geturl())        # auch nach Weiterleitungen prüfen
+    check_host(resp.geturl(), allowed)        # auch nach Weiterleitungen prüfen
     return resp
 
 
@@ -694,6 +698,84 @@ def monitor_process(ctx, proc, before):
         pass
 
 
+# --------------------------------------------------------------------------- Launcher-Selbstupdate
+# Eine laufende EXE kann sich unter Windows nicht selbst ersetzen. Darum: neue Version in
+# RobloxPortable\Launcher\v<N>\ entpacken und direkt als EXE starten (kein .bat/.ps1, keine Admin-Rechte).
+# Beim nächsten Start leitet die ältere EXE automatisch auf die neueste um.
+def newest_local_launcher(paths):
+    best = (0, None)
+    d = os.path.join(paths.base, "Launcher")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return best
+    for n in names:
+        m = re.fullmatch(r"v(\d+)", n)
+        exe = os.path.join(d, n, "RobloxPortable", "RobloxPortable.exe")
+        if m and os.path.isfile(exe) and int(m.group(1)) > best[0]:
+            best = (int(m.group(1)), exe)
+    return best
+
+
+def launch_launcher(paths, exe):
+    subprocess.Popen([exe, "--base", paths.base], cwd=os.path.dirname(exe), shell=False)
+
+
+def redirect_to_newer(paths):
+    """Beim Start: existiert ein neueres, bereits geladenes Launcher-Update? Dann dorthin wechseln."""
+    if APP_VERSION <= 0:
+        return False
+    n, exe = newest_local_launcher(paths)
+    if exe and n > APP_VERSION:
+        launch_launcher(paths, exe)
+        return True
+    return False
+
+
+def check_launcher_update(ctx):
+    """Prüft auf ein neues Launcher-Release. Rückgabe: Pfad der neuen EXE oder None."""
+    if APP_VERSION <= 0:
+        return None
+    p = ctx.paths
+    with _open(UPDATE_BASE + "/version.json", allowed=UPDATE_HOSTS) as r:
+        info = json.loads(r.read().decode("utf-8"))
+    try:
+        n, sha = int(info["version"]), str(info["sha256"]).lower()
+    except (KeyError, ValueError, TypeError):
+        raise UserError("Die Launcher-Versionsangabe ist ungültig.")
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        raise UserError("Die Launcher-Prüfsumme ist ungültig.")
+    have, have_exe = newest_local_launcher(p)
+    if n <= max(APP_VERSION, have):
+        return None
+    ctx.log("Neue Launcher-Version %d gefunden (aktuell %d). Lade …" % (n, max(APP_VERSION, have)))
+    d = os.path.join(p.base, "Launcher")
+    os.makedirs(d, exist_ok=True)
+    zpath, tmp, final = (os.path.join(d, "v%d.zip" % n), os.path.join(d, "v%d.tmp" % n), os.path.join(d, "v%d" % n))
+    h = hashlib.sha256()
+    with _open(UPDATE_BASE + "/RobloxPortable.zip", timeout=60, allowed=UPDATE_HOSTS) as r, open(zpath, "wb") as f:
+        for chunk in iter(lambda: r.read(1 << 16), b""):
+            ctx.check_cancel()
+            h.update(chunk)
+            f.write(chunk)
+    if h.hexdigest() != sha:
+        os.remove(zpath)
+        raise UserError("Launcher-Update verworfen: Prüfsumme stimmt nicht.")
+    shutil.rmtree(tmp, ignore_errors=True)
+    extract_zip(ctx, zpath, tmp, "")
+    if not os.path.isfile(os.path.join(tmp, "RobloxPortable", "RobloxPortable.exe")):
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise UserError("Launcher-Update unvollständig (EXE fehlt).")
+    shutil.rmtree(final, ignore_errors=True)
+    os.rename(tmp, final)
+    os.remove(zpath)
+    for name in os.listdir(d):                       # ältere Launcher-Versionen aufräumen
+        if re.fullmatch(r"v\d+", name) and name != "v%d" % n:
+            shutil.rmtree(os.path.join(d, name), ignore_errors=True)
+    ctx.log("Launcher-Update %d installiert." % n)
+    return os.path.join(final, "RobloxPortable", "RobloxPortable.exe")
+
+
 # --------------------------------------------------------------------------- GUI
 def run_gui(paths):
     import queue
@@ -707,7 +789,7 @@ def run_gui(paths):
               progress=lambda d, t, s: q.put(("prog", d, t, s)), cancel=cancel)
 
     root = tk.Tk()
-    root.title("Roblox Portable")
+    root.title("Roblox Portable" + (" (v%d)" % APP_VERSION if APP_VERSION else ""))
     root.geometry("640x480")
     root.minsize(520, 380)
     status = tk.StringVar(value="Bereit.")
@@ -750,6 +832,13 @@ def run_gui(paths):
                     status.set("%s  (%.0f / %.0f MB)" % (s, d / 2**20, t / 2**20))
                 elif m[0] == "status":
                     status.set(m[1])
+                elif m[0] == "restart":
+                    try:
+                        launch_launcher(paths, m[1])
+                        root.destroy()
+                        return
+                    except OSError as e:
+                        status.set("Launcher-Update geladen, Neustart blockiert: %s" % e)
                 elif m[0] == "busy":
                     set_busy(m[1])
                 elif m[0] == "error":
@@ -764,6 +853,16 @@ def run_gui(paths):
             q.put(("busy", True))
             cancel.clear()
             try:
+                if auto:                                   # erst Launcher selbst, dann Roblox
+                    try:
+                        newexe = check_launcher_update(ctx)
+                    except Exception as e:
+                        ctx.log("Launcher-Update-Prüfung nicht möglich: " + explain(e))
+                        newexe = None
+                    if newexe:
+                        q.put(("status", "Launcher aktualisiert – starte neu …"))
+                        q.put(("restart", newexe))
+                        return
                 if auto and not installed_version(paths):
                     q.put(("status", "Roblox ist noch nicht installiert. Bitte „Installieren/Aktualisieren“ klicken."))
                     return
@@ -825,6 +924,8 @@ def run_cli(paths, argv):
             print("Basis:", paths.base, "| installiert:", installed_version(paths))
         elif cmd == "install":
             print(install(ctx))
+        elif cmd == "update-launcher":
+            print(check_launcher_update(ctx))
         elif cmd == "start":
             before = take_snapshot(paths)
             proc = start_player(ctx, argv[1] if len(argv) > 1 else "")
@@ -849,6 +950,8 @@ def main():
     os.environ["TEMP"] = os.environ["TMP"] = paths.temp
     if argv and argv[0] == "--cli":
         sys.exit(run_cli(paths, argv[1:]))
+    if redirect_to_newer(paths):                  # neueres Launcher-Update bereits vorhanden
+        sys.exit(0)
     run_gui(paths)
 
 
