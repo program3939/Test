@@ -180,6 +180,10 @@ def explain(e):
         if isinstance(r, ssl.SSLError):
             why = ("Zertifikatsfehler: Ein Proxy/Virenscanner im Netzwerk prüft vermutlich den HTTPS-Verkehr "
                    "und Roblox wird dadurch abgelehnt.")
+        elif isinstance(r, PermissionError):
+            why = ("Windows oder eine Sicherheitssoftware verbietet diesem Programm den Netzwerkzugriff "
+                   "(WinError 10013). Das ist eine Sperre dieses Rechners bzw. Netzwerks, kein Programmfehler. "
+                   "Bitte den Administrator fragen oder einen anderen Rechner/ein anderes Netzwerk nutzen.")
         elif isinstance(r, socket.gaierror):
             why = "Der Servername ließ sich nicht auflösen (DNS). Roblox-Domains sind vermutlich im Netzwerk gesperrt."
         elif isinstance(r, (socket.timeout, TimeoutError)):
