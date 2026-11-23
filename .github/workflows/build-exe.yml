@@ -4,6 +4,9 @@ on:
   push:
     paths: ["roblox_portable.py", ".github/workflows/build-exe.yml"]
 
+permissions:
+  contents: write         # nötig, um das Release zu veröffentlichen
+
 jobs:
   build:
     runs-on: windows-latest
@@ -18,7 +21,17 @@ jobs:
         run: |
           python -m pip install pyinstaller
           python -m PyInstaller --onedir --windowed --name RobloxPortable roblox_portable.py
+      - name: ZIP erstellen
+        shell: pwsh
+        run: Compress-Archive -Path dist/RobloxPortable -DestinationPath RobloxPortable.zip
       - uses: actions/upload-artifact@v4
         with:
           name: RobloxPortable
           path: dist/RobloxPortable
+      - name: Öffentliches Release veröffentlichen
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest RobloxPortable.zip --title "RobloxPortable (Windows)" --notes "Entpacken und RobloxPortable.exe starten. Kein Admin nötig." --latest
